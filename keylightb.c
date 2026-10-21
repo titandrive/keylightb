@@ -50,6 +50,8 @@
 
 // How long to wait after nudging the brightness before checking whether the firmware accepted it
 #define AUTO_PROBE_DELAY_NSEC 200000000
+#define AUTO_PROBE_MAX_ATTEMPTS 5
+#define AUTO_PROBE_REQUIRED_IGNORES 2
 
 // SD_LISTEN_FDS_START, but we don't want to link to systemd
 #define BRIGHTNESS_FD 3
@@ -184,12 +186,30 @@ static int get_brightness(){
 
 // Check whether the firmware's auto brightness mode is active by nudging the brightness by 1% and seeing whether it sticks
 // In auto mode the firmware ignores writes, so this is invisible either way
-static bool firmware_auto_active(int const current_brightness){
-	int const probe_brightness=current_brightness>1?current_brightness-1:current_brightness+1;
-	fprintf(brightness_file,"%d",probe_brightness);
+// The firmware also fades between Fn+Space steps on its own and overrides writes while doing so, so retry if the level is moving and only report auto mode after repeated ignored nudges
+static bool firmware_auto_active(int *const restrict settled_brightness){
 	struct timespec const probe_delay={.tv_sec=0,.tv_nsec=AUTO_PROBE_DELAY_NSEC};
-	nanosleep(&probe_delay,NULL);
-	return get_brightness()!=probe_brightness;
+	int ignored_count=0;
+	for(int attempt=0;attempt<AUTO_PROBE_MAX_ATTEMPTS;attempt++){
+		int const before_brightness=get_brightness();
+		*settled_brightness=before_brightness;
+		if(before_brightness<=0){
+			return false;
+		}
+		int const probe_brightness=before_brightness>1?before_brightness-1:before_brightness+1;
+		fprintf(brightness_file,"%d",probe_brightness);
+		nanosleep(&probe_delay,NULL);
+		int const after_brightness=get_brightness();
+		if(after_brightness==probe_brightness){
+			// The nudge stuck, so the firmware accepts writes; put the level back
+			fprintf(brightness_file,"%d",before_brightness);
+			return false;
+		}else if(after_brightness==before_brightness&&++ignored_count>=AUTO_PROBE_REQUIRED_IGNORES){
+			return true;
+		}
+		// Otherwise the level changed by itself (a firmware fade is in progress), so try again
+	}
+	return false;
 }
 
 static void start_fade(int const brightness){
@@ -459,13 +479,19 @@ int main(int const argc,char *const *const argv){
 			// If the off_time is in the future
 			if(desired_brightness==0){
 				if(firmware_auto){
+					int settled_brightness;
 					// Fn+Space cycles from auto to off, so a reading of 0 means auto mode was switched off
 					if(get_brightness()==0){
 						log_write(LOG_INFO,"Firmware auto brightness switched off, staying off until it is turned back on");
 						firmware_auto=false;
 						disabled=true;
+					}else if(!firmware_auto_active(&settled_brightness)){
+						// Recheck on each burst of activity, in case auto mode was misdetected or a fixed level was selected
+						log_write(LOG_INFO,"Firmware accepts brightness changes again, resuming");
+						firmware_auto=false;
 					}
-				}else if(!is_fading()){
+				}
+				if(!firmware_auto&&!is_fading()){
 					// And the backlight is currently off, check whether it was turned on while idle (e.g. Fn+Space or the desktop environment restoring it)
 					int const actual_brightness=get_brightness();
 					if(actual_brightness>0){
@@ -498,12 +524,13 @@ int main(int const argc,char *const *const argv){
 					log_write(LOG_INFO,"Backlight turned off manually, staying off until it is turned back on");
 					disabled=true;
 				}else if(actual_brightness>0){
-					if(firmware_auto_active(actual_brightness)){
+					int settled_brightness=actual_brightness;
+					if(firmware_auto_active(&settled_brightness)){
 						// Don't fade out (the firmware would undo it, causing a flash); writes are suppressed until auto mode is switched off
 						log_write(LOG_INFO,"Firmware auto brightness is active, leaving the backlight to it until it is switched off with Fn+Space");
 						firmware_auto=true;
-					}else if(map_level(actual_brightness)!=configured_brightness){
-						configured_brightness=map_level(actual_brightness);
+					}else if(settled_brightness>0&&map_level(settled_brightness)!=configured_brightness){
+						configured_brightness=map_level(settled_brightness);
 						log_write(LOG_INFO,"Brightness level changed to %d%%",configured_brightness);
 					}
 				}
