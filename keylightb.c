@@ -70,6 +70,7 @@ static struct option const long_options[]={
 	{"brightness",required_argument,0,'b'},
 	{"fadeduration",required_argument,0,'f'},
 	{"timeout",required_argument,0,'t'},
+	{"levels",required_argument,0,'l'},
 	{"help",no_argument,0,'h'},
 	{},
 };
@@ -218,17 +219,52 @@ static int string_to_int(int *const restrict result,int const min,int const max,
 	return EXIT_FAILURE;
 }
 
+// Remapping of firmware brightness levels (e.g. the Fn+Space steps) to levels of the user's choosing
+#define MAX_LEVEL_MAP_COUNT 8
+static int level_map_from[MAX_LEVEL_MAP_COUNT];
+static int level_map_to[MAX_LEVEL_MAP_COUNT];
+static int level_map_count=0;
+
+// Parse a list like "20=5,75=40" into the level map
+static int parse_level_map(char const *const restrict string){
+	char buffer[256];
+	snprintf(buffer,sizeof(buffer),"%s",string);
+	char *save_pointer;
+	for(char *token=strtok_r(buffer,",",&save_pointer);token;token=strtok_r(NULL,",",&save_pointer)){
+		int from;
+		int to;
+		char extra;
+		if(level_map_count>=MAX_LEVEL_MAP_COUNT||sscanf(token,"%d=%d%c",&from,&to,&extra)!=2||from<1||from>100||to<1||to>100){
+			return EXIT_FAILURE;
+		}
+		level_map_from[level_map_count]=from;
+		level_map_to[level_map_count]=to;
+		level_map_count++;
+	}
+	return level_map_count>0?EXIT_SUCCESS:EXIT_FAILURE;
+}
+
+static int map_level(int const brightness){
+	for(int map_index=0;map_index<level_map_count;map_index++){
+		if(level_map_from[map_index]==brightness){
+			return level_map_to[map_index];
+		}
+	}
+	return brightness;
+}
+
 static bool timespec_gt(struct timespec const ts1,struct timespec const ts2){
 	return (ts1.tv_sec>ts2.tv_sec)||(ts1.tv_sec==ts2.tv_sec&&ts1.tv_nsec>ts2.tv_nsec);
 }
 
 static int usage(){
-	log_write(LOG_NOTICE,"Usage: keylightb [--brightness <brightness>] [--fadeduration <fadeduration>] [--timeout <timeout>]");
+	log_write(LOG_NOTICE,"Usage: keylightb [--brightness <brightness>] [--fadeduration <fadeduration>] [--timeout <timeout>] [--levels <from>=<to>,...]");
 	log_write(LOG_NOTICE,"keylightb - automatic keyboard backlight daemon for Framework laptops");
 	log_write(LOG_NOTICE,"Options:");
 	log_write(LOG_NOTICE,"  --brightness\t\tbrightness level when active (1-100) [default=%d]",DEFAULT_BRIGHTNESS);
 	log_write(LOG_NOTICE,"  --fadeduration\tfade time in microseconds (1-1000000) [default=%d]",DEFAULT_FADE_DURATION_USEC);
 	log_write(LOG_NOTICE,"  --timeout\t\tactivity timeout in seconds (1-%d) [default=%d]",INT_MAX,DEFAULT_TIMEOUT_SEC);
+	log_write(LOG_NOTICE,"  --levels\t\tuse different levels for Fn+Space steps, e.g. 20=5,75=40 (1-100)");
 	log_write(LOG_NOTICE,"  --help\t\tdisplay usage information");
 	return EXIT_FAILURE;
 }
@@ -323,6 +359,11 @@ int main(int const argc,char *const *const argv){
 					return usage();
 				}
 				break;
+			case 'l':
+				if(parse_level_map(optarg)){
+					return usage();
+				}
+				break;
 			case 'h':
 			default:
 				return usage();
@@ -349,7 +390,10 @@ int main(int const argc,char *const *const argv){
 	log_write(LOG_INFO,"Backlight timeout: %d second%s",timeout_sec,timeout_sec!=1?"s":"");
 	log_write(LOG_INFO,"Brightness level: %d%%",configured_brightness);
 	log_write(LOG_INFO,"Fade duration: %d microsecond%s",fade_duration_nsec/NSEC_PER_USEC,fade_duration_nsec/NSEC_PER_USEC!=1?"s":"");
-	
+	for(int map_index=0;map_index<level_map_count;map_index++){
+		log_write(LOG_INFO,"Level %d%% is used as %d%%",level_map_from[map_index],level_map_to[map_index]);
+	}
+
 	pthread_condattr_t condattr;
 	pthread_condattr_init(&condattr);
 	pthread_condattr_setclock(&condattr,CLOCK_MONOTONIC);
@@ -429,9 +473,10 @@ int main(int const argc,char *const *const argv){
 							log_write(LOG_INFO,"Backlight turned back on manually, resuming");
 							disabled=false;
 						}
-						if(actual_brightness!=configured_brightness){
-							log_write(LOG_INFO,"Brightness level changed to %d%%",actual_brightness);
-							configured_brightness=actual_brightness;
+						int const new_brightness=map_level(actual_brightness);
+						if(new_brightness!=configured_brightness){
+							log_write(LOG_INFO,"Brightness level changed to %d%%",new_brightness);
+							configured_brightness=new_brightness;
 						}
 					}
 				}
@@ -457,9 +502,9 @@ int main(int const argc,char *const *const argv){
 						// Don't fade out (the firmware would undo it, causing a flash); writes are suppressed until auto mode is switched off
 						log_write(LOG_INFO,"Firmware auto brightness is active, leaving the backlight to it until it is switched off with Fn+Space");
 						firmware_auto=true;
-					}else if(actual_brightness!=configured_brightness){
-						log_write(LOG_INFO,"Brightness level changed to %d%%",actual_brightness);
-						configured_brightness=actual_brightness;
+					}else if(map_level(actual_brightness)!=configured_brightness){
+						configured_brightness=map_level(actual_brightness);
+						log_write(LOG_INFO,"Brightness level changed to %d%%",configured_brightness);
 					}
 				}
 			}
