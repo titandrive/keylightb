@@ -80,6 +80,10 @@ static struct option const long_options[]={
 	{"timeout",required_argument,0,'t'},
 	{"levels",required_argument,0,'l'},
 	{"touchpad",required_argument,0,'p'},
+	{"custom_levels",required_argument,0,'c'},
+	{"level1",required_argument,0,'1'},
+	{"level2",required_argument,0,'2'},
+	{"level3",required_argument,0,'3'},
 	{"help",no_argument,0,'h'},
 	{},
 };
@@ -253,6 +257,27 @@ static int level_map_from[MAX_LEVEL_MAP_COUNT];
 static int level_map_to[MAX_LEVEL_MAP_COUNT];
 static int level_map_count=0;
 
+// The Fn+Space steps of the Framework Laptop 13 Pro firmware, and the user's replacements for them (custom_levels/level1-3)
+#define FIRMWARE_LEVEL_COUNT 3
+static int const firmware_levels[FIRMWARE_LEVEL_COUNT]={20,75,100};
+static int custom_level_values[FIRMWARE_LEVEL_COUNT]={20,75,100};
+static bool custom_levels=false;
+
+// Build the level map from custom_levels/level1-3; this replaces any --levels list
+static void apply_custom_levels(){
+	if(!custom_levels){
+		return;
+	}
+	level_map_count=0;
+	for(int level_index=0;level_index<FIRMWARE_LEVEL_COUNT;level_index++){
+		if(custom_level_values[level_index]!=firmware_levels[level_index]){
+			level_map_from[level_map_count]=firmware_levels[level_index];
+			level_map_to[level_map_count]=custom_level_values[level_index];
+			level_map_count++;
+		}
+	}
+}
+
 // Parse a list like "20=5,75=40" into the level map
 static int parse_level_map(char const *const restrict string){
 	// A later setting (e.g. the command line after the config file) replaces an earlier one
@@ -289,13 +314,15 @@ static bool timespec_gt(struct timespec const ts1,struct timespec const ts2){
 }
 
 static int usage(){
-	log_write(LOG_NOTICE,"Usage: keylightb [--brightness <brightness>] [--fadeduration <fadeduration>] [--timeout <timeout>] [--levels <from>=<to>,...] [--touchpad yes|no]");
+	log_write(LOG_NOTICE,"Usage: keylightb [--brightness <brightness>] [--fadeduration <fadeduration>] [--timeout <timeout>] [--custom_levels yes|no] [--level1 <level>] [--level2 <level>] [--level3 <level>] [--levels <from>=<to>,...] [--touchpad yes|no]");
 	log_write(LOG_NOTICE,"keylightb - automatic keyboard backlight daemon for Framework laptops");
 	log_write(LOG_NOTICE,"Options:");
 	log_write(LOG_NOTICE,"  --brightness\t\tbrightness level when active (1-100) [default=%d]",DEFAULT_BRIGHTNESS);
 	log_write(LOG_NOTICE,"  --fadeduration\tfade time in microseconds (1-1000000) [default=%d]",DEFAULT_FADE_DURATION_USEC);
 	log_write(LOG_NOTICE,"  --timeout\t\tactivity timeout in seconds (1-%d) [default=%d]",INT_MAX,DEFAULT_TIMEOUT_SEC);
-	log_write(LOG_NOTICE,"  --levels\t\tuse different levels for Fn+Space steps, e.g. 20=5,75=40 (1-100)");
+	log_write(LOG_NOTICE,"  --custom_levels\treplace the Fn+Space levels with --level1/2/3 (yes/no) [default=no]");
+	log_write(LOG_NOTICE,"  --level1/2/3\t\tlevel to use for Fn+Space step 1/2/3 (1-100) [default=20/75/100]");
+	log_write(LOG_NOTICE,"  --levels\t\tadvanced: replace any firmware level, e.g. 20=5,75=40 (1-100)");
 	log_write(LOG_NOTICE,"  --touchpad\t\twhether touchpad use turns the backlight on (yes/no) [default=yes]");
 	log_write(LOG_NOTICE,"  --help\t\tdisplay usage information");
 	return EXIT_FAILURE;
@@ -360,6 +387,17 @@ void *fader(void*){
 	}
 }
 
+static int parse_yes_no(bool *const restrict result,char const *const restrict value){
+	if(!strcmp(value,"yes")||!strcmp(value,"true")||!strcmp(value,"on")||!strcmp(value,"1")){
+		*result=true;
+	}else if(!strcmp(value,"no")||!strcmp(value,"false")||!strcmp(value,"off")||!strcmp(value,"0")){
+		*result=false;
+	}else{
+		return EXIT_FAILURE;
+	}
+	return EXIT_SUCCESS;
+}
+
 // Apply one setting, from either the command line or the config file
 static int apply_option(int const option,char const *const restrict value,int *const restrict timeout_sec,int *const restrict configured_brightness){
 	switch(option){
@@ -376,14 +414,13 @@ static int apply_option(int const option,char const *const restrict value,int *c
 		case 'l':
 			return parse_level_map(value);
 		case 'p':
-			if(!strcmp(value,"yes")||!strcmp(value,"true")||!strcmp(value,"on")||!strcmp(value,"1")){
-				watch_touchpad=true;
-			}else if(!strcmp(value,"no")||!strcmp(value,"false")||!strcmp(value,"off")||!strcmp(value,"0")){
-				watch_touchpad=false;
-			}else{
-				return EXIT_FAILURE;
-			}
-			return EXIT_SUCCESS;
+			return parse_yes_no(&watch_touchpad,value);
+		case 'c':
+			return parse_yes_no(&custom_levels,value);
+		case '1':
+		case '2':
+		case '3':
+			return string_to_int(&custom_level_values[option-'1'],1,100,value);
 		default:
 			return EXIT_FAILURE;
 	}
@@ -466,7 +503,8 @@ int main(int const argc,char *const *const argv){
 			return usage();
 		}
 	}
-	
+	apply_custom_levels();
+
 	// Try to open the systemd-provided brightness file
 	if(!(brightness_file=fdopen(BRIGHTNESS_FD,"w"))){
 		// If that didn't work, try to open it ourselves

@@ -59,7 +59,8 @@ sudo systemctl restart keylightb
 | Setting | What it does | Default |
 |---|---|---|
 | `brightness` | Brightness (1-100) when keylightb starts. After you pick a level with Fn+Space, that level is used instead. | `30` |
-| `levels` | Replace Fn+Space steps with your own levels, as `<firmware level>=<your level>` pairs, e.g. `20=5, 75=40`. Leave empty for none. | empty |
+| `custom_levels` | Replace the firmware's Fn+Space levels with your own: `yes` or `no`. | `no` |
+| `level1` / `level2` / `level3` | With `custom_levels = yes`, the brightness (1-100) to use for Fn+Space step 1, 2 or 3. Leave commented out to keep the firmware's value. | `20` / `75` / `100` |
 | `timeout` | Seconds without input before the backlight fades out. | `10` |
 | `fadeduration` | How long a fade takes, in microseconds (`100000` = 0.1 s). | `100000` |
 | `touchpad` | Whether using the touchpad turns the backlight on: `yes` or `no`. | `yes` |
@@ -68,18 +69,22 @@ Example:
 
 ```ini
 brightness = 5
-levels = 20=5
+custom_levels = yes
+level1 = 5
+#level2 = 75
+#level3 = 100
 timeout = 10
 fadeduration = 100000
 touchpad = no
 ```
 
-On the Framework Laptop 13 Pro the Fn+Space steps are **20 → 75 → 100 → auto → off**. Setting `brightness` to the level you use most (or its remapped value) means the keyboard lights at that level right after a reboot too.
+On the Framework Laptop 13 Pro the Fn+Space steps are **20 → 75 → 100 → auto → off**; `level1`-`level3` replace the first three. Setting `brightness` to the level you use most means the keyboard lights at that level right after a reboot too.
 
 The same settings exist as command-line options, which override the file:
 
 ```
-keylightb [--brightness <1-100>] [--levels <from>=<to>,...] [--timeout <seconds>]
+keylightb [--brightness <1-100>] [--custom_levels yes|no] [--level1 <1-100>]
+          [--level2 <1-100>] [--level3 <1-100>] [--timeout <seconds>]
           [--fadeduration <microseconds>] [--touchpad yes|no]
 ```
 
@@ -87,13 +92,13 @@ keylightb [--brightness <1-100>] [--levels <from>=<to>,...] [--timeout <seconds>
 
 | Fn+Space mode | What happens |
 |---|---|
-| A fixed level | Fades on while you type and off after `timeout`, at that level (or its `levels` replacement) |
+| A fixed level | Fades on while you type and off after `timeout`, at that level (or your custom level for it) |
 | Auto (if your model has it) | The firmware sets the brightness from the light sensor; keylightb leaves it alone |
 | Off | Stays off; typing doesn't turn it on until you press Fn+Space again |
 
 Things to know:
 
-- **Fn+Space is invisible to Linux.** The laptop's embedded controller handles it without sending any input event. keylightb therefore notices a new level, and applies your `levels` replacement, at your **next keypress or touchpad movement** after Fn+Space. If you turn the light on with Fn+Space while it's faded out, it stays on until you next type.
+- **Fn+Space is invisible to Linux.** The laptop's embedded controller handles it without sending any input event. keylightb therefore notices a new level, and applies your custom level, at your **next keypress or touchpad movement** after Fn+Space. If you turn the light on with Fn+Space while it's faded out, it stays on until you next type.
 - **Auto mode detection.** In auto mode the firmware ignores brightness changes from the OS. Before fading out, keylightb nudges the brightness by 1% and checks whether it sticks. If it doesn't, keylightb stops controlling the backlight until you leave auto mode. It re-checks whenever you start typing, so a misdetection fixes itself at your next keypress.
 - **Levels aren't saved across restarts.** After a reboot keylightb starts at `brightness` until you next press Fn+Space.
 
