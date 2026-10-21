@@ -4,3 +4,4 @@ all:
 install:
 	install -m 755 -D -t $(DESTDIR)/usr/bin/ keylightb
 	install -m 644 -D -t $(DESTDIR)/usr/lib/systemd/system/ keylightb.service
+	test -e $(DESTDIR)/etc/keylightb.conf || install -m 644 -D keylightb.conf $(DESTDIR)/etc/keylightb.conf

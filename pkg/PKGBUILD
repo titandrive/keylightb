@@ -9,6 +9,7 @@ depends=('glibc')
 makedepends=('git')
 provides=('keylightb')
 conflicts=('keylightb')
+backup=('etc/keylightb.conf')
 source=("keylightb::git+https://github.com/titandrive/keylightb.git")
 sha256sums=('SKIP')
 

@@ -6,10 +6,11 @@ keylightb is a small system daemon for Framework laptops that listens to keyboar
 
 Differences from keylightc
 --------------------------
-* **Remembers your brightness.** If you change the backlight level with Fn+Space or your desktop's brightness control, keylightb uses that level from then on instead of jumping back to `--brightness`. `--brightness` is only the starting level.
+* **Remembers your brightness.** If you change the backlight level with Fn+Space or your desktop's brightness control, keylightb uses that level from then on instead of jumping back to the starting level.
 * **Manual off switch.** If you turn the backlight off yourself while it's lit, keylightb leaves it off until you turn it back on.
 * **Plays nice with firmware auto brightness.** On models where Fn+Space includes an auto mode (e.g. the Framework Laptop 13 Pro), the firmware sets the level from the ambient light sensor and ignores the OS. keylightb detects this without any visible change (it nudges the level by 1% and checks whether it sticks) and leaves the backlight alone until you switch out of auto.
 * **Smooth fades after outside changes.** Fades start from the brightness actually applied, so they don't glitch after something else changed the level.
+* **Settings file.** Brightness, Fn+Space level remapping, timeout, fade duration and touchpad use are set in `/etc/keylightb.conf`.
 * **Works with more touchpads.** Any input device whose name ends in "Touchpad" is watched, so it supports the touchpads on both older and newer Framework models (e.g. `PIXA3854:00 093A:0274` and `PIXA3854:00 093A:1343`).
 
 Installation
@@ -32,18 +33,30 @@ Running
 -------
 keylightb must either be run as root or using the included systemd unit.
 
-	Usage: keylightb [--brightness <brightness>] [--fadeduration <fadeduration>] [--timeout <timeout>]
-	Options:
-	  --brightness          starting brightness level when active (1-100) [default=30]
-	  --fadeduration        fade time in microseconds (1-1000000) [default=100000]
-	  --timeout             activity timeout in seconds (1-2147483647) [default=10]
-	  --help                display usage information
+### Settings
+Settings live in `/etc/keylightb.conf`. The package installs a commented example; remove the `#` in front of a setting to use it, then restart the service:
 
-To change the options, override the service with `sudo systemctl edit keylightb.service`:
+	$ sudo nano /etc/keylightb.conf
+	$ sudo systemctl restart keylightb
 
-	[Service]
-	ExecStart=
-	ExecStart=/usr/bin/keylightb --timeout 15
+| Setting | Meaning | Default |
+|---|---|---|
+| `brightness` | Starting brightness (1-100); after that keylightb uses the level you pick with Fn+Space | `30` |
+| `levels` | Use your own levels for the Fn+Space steps, e.g. `20=5, 75=40` | none |
+| `timeout` | Seconds without typing or touchpad use before fading out | `10` |
+| `fadeduration` | Fade time in microseconds (`100000` = 0.1 s) | `100000` |
+| `touchpad` | Whether touchpad use turns the backlight on: `yes` or `no` | `yes` |
+
+Example:
+
+	brightness = 5
+	levels = 20=5
+	timeout = 10
+	touchpad = no
+
+The same settings are available as command-line options, which override the file:
+
+	Usage: keylightb [--brightness <brightness>] [--fadeduration <fadeduration>] [--timeout <timeout>] [--levels <from>=<to>,...] [--touchpad yes|no]
 
 ### How Fn+Space modes behave
 

@@ -44,6 +44,9 @@
 #define EVENT_DEVICE_FILENAME_PREFIX "event"
 
 #define BRIGHTNESS_FILE_PATH "/sys/class/leds/chromeos::kbd_backlight/brightness"
+#ifndef CONFIG_FILE_PATH
+#define CONFIG_FILE_PATH "/etc/keylightb.conf"
+#endif
 #define DEFAULT_TIMEOUT_SEC 10
 #define DEFAULT_BRIGHTNESS 30
 #define DEFAULT_FADE_DURATION_USEC 100000
@@ -68,11 +71,15 @@ static char const *const restrict search_devices[SEARCH_DEVICE_COUNT]={
 // Any device whose name ends with this is also watched, since the touchpad model differs between Framework laptops
 #define TOUCHPAD_NAME_SUFFIX " Touchpad"
 
+// Whether touchpad activity turns the backlight on, in addition to the keyboard
+static bool watch_touchpad=true;
+
 static struct option const long_options[]={
 	{"brightness",required_argument,0,'b'},
 	{"fadeduration",required_argument,0,'f'},
 	{"timeout",required_argument,0,'t'},
 	{"levels",required_argument,0,'l'},
+	{"touchpad",required_argument,0,'p'},
 	{"help",no_argument,0,'h'},
 	{},
 };
@@ -148,7 +155,7 @@ static int get_input_fds(struct pollfd *const restrict pollfds){
 		}
 		ioctl(fd,EVIOCGNAME(sizeof(device_name)-1),device_name);
 
-		if(string_in_array(device_name,search_devices,SEARCH_DEVICE_COUNT)||string_ends_with(device_name,TOUCHPAD_NAME_SUFFIX)){
+		if(string_in_array(device_name,search_devices,SEARCH_DEVICE_COUNT)||(watch_touchpad&&string_ends_with(device_name,TOUCHPAD_NAME_SUFFIX))){
 			ioctl(fd,EVIOCSCLOCKID,&clock_type);
 			log_write(LOG_INFO,"Using device %s:\t%s",device_filename,device_name);
 			pollfds[found_device_count].fd=fd;
@@ -248,6 +255,8 @@ static int level_map_count=0;
 
 // Parse a list like "20=5,75=40" into the level map
 static int parse_level_map(char const *const restrict string){
+	// A later setting (e.g. the command line after the config file) replaces an earlier one
+	level_map_count=0;
 	char buffer[256];
 	snprintf(buffer,sizeof(buffer),"%s",string);
 	char *save_pointer;
@@ -279,13 +288,14 @@ static bool timespec_gt(struct timespec const ts1,struct timespec const ts2){
 }
 
 static int usage(){
-	log_write(LOG_NOTICE,"Usage: keylightb [--brightness <brightness>] [--fadeduration <fadeduration>] [--timeout <timeout>] [--levels <from>=<to>,...]");
+	log_write(LOG_NOTICE,"Usage: keylightb [--brightness <brightness>] [--fadeduration <fadeduration>] [--timeout <timeout>] [--levels <from>=<to>,...] [--touchpad yes|no]");
 	log_write(LOG_NOTICE,"keylightb - automatic keyboard backlight daemon for Framework laptops");
 	log_write(LOG_NOTICE,"Options:");
 	log_write(LOG_NOTICE,"  --brightness\t\tbrightness level when active (1-100) [default=%d]",DEFAULT_BRIGHTNESS);
 	log_write(LOG_NOTICE,"  --fadeduration\tfade time in microseconds (1-1000000) [default=%d]",DEFAULT_FADE_DURATION_USEC);
 	log_write(LOG_NOTICE,"  --timeout\t\tactivity timeout in seconds (1-%d) [default=%d]",INT_MAX,DEFAULT_TIMEOUT_SEC);
 	log_write(LOG_NOTICE,"  --levels\t\tuse different levels for Fn+Space steps, e.g. 20=5,75=40 (1-100)");
+	log_write(LOG_NOTICE,"  --touchpad\t\twhether touchpad use turns the backlight on (yes/no) [default=yes]");
 	log_write(LOG_NOTICE,"  --help\t\tdisplay usage information");
 	return EXIT_FAILURE;
 }
@@ -349,6 +359,89 @@ void *fader(void*){
 	}
 }
 
+// Apply one setting, from either the command line or the config file
+static int apply_option(int const option,char const *const restrict value,int *const restrict timeout_sec,int *const restrict configured_brightness){
+	switch(option){
+		case 'b':
+			return string_to_int(configured_brightness,1,100,value);
+		case 'f':
+			if(string_to_int(&fade_duration_nsec,1,1000000,value)){
+				return EXIT_FAILURE;
+			}
+			fade_duration_nsec*=NSEC_PER_USEC;
+			return EXIT_SUCCESS;
+		case 't':
+			return string_to_int(timeout_sec,1,INT_MAX,value);
+		case 'l':
+			return parse_level_map(value);
+		case 'p':
+			if(!strcmp(value,"yes")||!strcmp(value,"true")||!strcmp(value,"on")||!strcmp(value,"1")){
+				watch_touchpad=true;
+			}else if(!strcmp(value,"no")||!strcmp(value,"false")||!strcmp(value,"off")||!strcmp(value,"0")){
+				watch_touchpad=false;
+			}else{
+				return EXIT_FAILURE;
+			}
+			return EXIT_SUCCESS;
+		default:
+			return EXIT_FAILURE;
+	}
+}
+
+static char *trim(char *string){
+	while(*string==' '||*string=='\t'){
+		string++;
+	}
+	char *end=string+strlen(string);
+	while(end>string&&(end[-1]==' '||end[-1]=='\t'||end[-1]=='\n'||end[-1]=='\r')){
+		*--end='\0';
+	}
+	return string;
+}
+
+// Read "name = value" settings from the config file, if it exists; the names match the long command-line options
+static int load_config(int *const restrict timeout_sec,int *const restrict configured_brightness){
+	FILE *const file=fopen(CONFIG_FILE_PATH,"r");
+	if(!file){
+		return errno==ENOENT?EXIT_SUCCESS:(log_write(LOG_ERR,"Failed to read %s",CONFIG_FILE_PATH),EXIT_FAILURE);
+	}
+
+	char line[512];
+	int line_number=0;
+	while(fgets(line,sizeof(line),file)){
+		line_number++;
+		char *const comment=strchr(line,'#');
+		if(comment){
+			*comment='\0';
+		}
+		char *const setting=trim(line);
+		if(!*setting){
+			continue;
+		}
+
+		char *const separator=strchr(setting,'=');
+		int option=0;
+		if(separator){
+			*separator='\0';
+			char const *const name=trim(setting);
+			for(struct option const *long_option=long_options;long_option->name;long_option++){
+				if(long_option->has_arg==required_argument&&!strcmp(name,long_option->name)){
+					option=long_option->val;
+				}
+			}
+		}
+		if(!option||apply_option(option,trim(separator+1),timeout_sec,configured_brightness)){
+			log_write(LOG_ERR,"Invalid setting on line %d of %s",line_number,CONFIG_FILE_PATH);
+			fclose(file);
+			return EXIT_FAILURE;
+		}
+	}
+
+	fclose(file);
+	log_write(LOG_INFO,"Loaded settings from %s",CONFIG_FILE_PATH);
+	return EXIT_SUCCESS;
+}
+
 int main(int const argc,char *const *const argv){
 	is_daemon=!isatty(STDOUT_FILENO);
 	
@@ -358,36 +451,18 @@ int main(int const argc,char *const *const argv){
 	// Set when the backlight is manually turned off while active, cleared when it is manually turned back on
 	bool disabled=false;
 
+	// Settings from the config file come first, so command-line options override them
+	if(load_config(&timeout_sec,&configured_brightness)){
+		return EXIT_FAILURE;
+	}
+
 	int option;
 	while((option=getopt_long(argc,argv,"",long_options,NULL))!=EOF){
-		switch(option){
-			case -1:
-			case 0:
-				break;
-			case 'b':
-				if(string_to_int(&configured_brightness,1,100,optarg)){
-					return usage();
-				}
-				break;
-			case 'f':
-				if(string_to_int(&fade_duration_nsec,1,1000000,optarg)){
-					return usage();
-				}
-				fade_duration_nsec*=NSEC_PER_USEC;
-				break;
-			case 't':
-				if(string_to_int(&timeout_sec,1,INT_MAX,optarg)){
-					return usage();
-				}
-				break;
-			case 'l':
-				if(parse_level_map(optarg)){
-					return usage();
-				}
-				break;
-			case 'h':
-			default:
-				return usage();
+		if(option==-1||option==0){
+			continue;
+		}
+		if(option=='h'||apply_option(option,optarg,&timeout_sec,&configured_brightness)){
+			return usage();
 		}
 	}
 	
