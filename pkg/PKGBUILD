@@ -1,0 +1,29 @@
+pkgname=keylightb-git
+pkgver=r0
+pkgrel=1
+pkgdesc="Keyboard backlight daemon for Framework laptops that follows your brightness choice (fork of keylightc)"
+arch=('x86_64')
+url="https://github.com/titandrive/keylightb"
+license=('GPL-2.0-or-later')
+depends=('glibc')
+makedepends=('git')
+provides=('keylightb')
+conflicts=('keylightb')
+source=("keylightb::git+https://github.com/titandrive/keylightb.git")
+sha256sums=('SKIP')
+
+pkgver() {
+	cd keylightb
+	printf "r%s.%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short=7 HEAD)"
+}
+
+build() {
+	cd keylightb
+	make
+}
+
+package() {
+	cd keylightb
+	make DESTDIR="$pkgdir" install
+	install -Dm644 README.md "$pkgdir/usr/share/doc/keylightb/README.md"
+}

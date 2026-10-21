@@ -51,12 +51,17 @@
 // SD_LISTEN_FDS_START, but we don't want to link to systemd
 #define BRIGHTNESS_FD 3
 
+// Maximum number of input devices to watch
+#define MAX_DEVICE_COUNT 8
+
 // This must be set exactly to the number of elements in the array or else a segfault will occur
-#define SEARCH_DEVICE_COUNT 2
+#define SEARCH_DEVICE_COUNT 1
 static char const *const restrict search_devices[SEARCH_DEVICE_COUNT]={
 	"AT Translated Set 2 keyboard",
-	"PIXA3854:00 093A:0274 Touchpad",
 };
+
+// Any device whose name ends with this is also watched, since the touchpad model differs between Framework laptops
+#define TOUCHPAD_NAME_SUFFIX " Touchpad"
 
 static struct option const long_options[]={
 	{"brightness",required_argument,0,'b'},
@@ -71,6 +76,8 @@ static pthread_mutex_t fader_mutex;
 static FILE *brightness_file;
 static int fade_duration_nsec=DEFAULT_FADE_DURATION_USEC*NSEC_PER_USEC;
 static int desired_brightness=0;
+static bool fade_in_progress=false;
+static int fader_target_brightness=0;
 
 static bool exit_requested=false;
 static bool is_daemon;
@@ -105,24 +112,34 @@ static bool string_in_array(char const *const restrict string,char const *const 
 	return false;
 }
 
+static bool string_ends_with(char const *const restrict string,char const *const restrict suffix){
+	size_t const string_length=strlen(string);
+	size_t const suffix_length=strlen(suffix);
+	return string_length>=suffix_length&&!strcmp(string+string_length-suffix_length,suffix);
+}
+
 static int get_input_fds(struct pollfd *const restrict pollfds){
 	struct dirent **device_name_list;
 	int const device_count=scandir(INPUT_DEVICE_DIRECTORY_PATH,&device_name_list,is_event_device,alphasort);
 	int const clock_type=CLOCK_MONOTONIC;
 	
 	int found_device_count=0;
-	for(int device_index=0;device_index<device_count&&found_device_count<=SEARCH_DEVICE_COUNT;device_index++){
+	for(int device_index=0;device_index<device_count;device_index++){
 		char device_filename[4096];
-		char device_name[256];
-		
+		char device_name[256]={};
+
 		snprintf(device_filename,sizeof(device_filename),"%s/%s",INPUT_DEVICE_DIRECTORY_PATH,device_name_list[device_index]->d_name);
+		free(device_name_list[device_index]);
+		if(found_device_count>=MAX_DEVICE_COUNT){
+			continue;
+		}
 		int const fd=open(device_filename,O_RDONLY);
 		if(fd<0){
 			continue;
 		}
-		ioctl(fd,EVIOCGNAME(sizeof(device_name)),device_name);
-		
-		if(string_in_array(device_name,search_devices,SEARCH_DEVICE_COUNT)){
+		ioctl(fd,EVIOCGNAME(sizeof(device_name)-1),device_name);
+
+		if(string_in_array(device_name,search_devices,SEARCH_DEVICE_COUNT)||string_ends_with(device_name,TOUCHPAD_NAME_SUFFIX)){
 			ioctl(fd,EVIOCSCLOCKID,&clock_type);
 			log_write(LOG_INFO,"Using device %s:\t%s",device_filename,device_name);
 			pollfds[found_device_count].fd=fd;
@@ -131,10 +148,11 @@ static int get_input_fds(struct pollfd *const restrict pollfds){
 		}else{
 			close(fd);
 		}
-		
-		free(device_name_list[device_index]);
 	}
-	
+	if(device_count>=0){
+		free(device_name_list);
+	}
+
 	return found_device_count;
 }
 
@@ -142,11 +160,31 @@ static void set_brightness(int const brightness){
 	fprintf(brightness_file,"%d",brightness);
 }
 
+// Read the brightness actually applied right now, which may have been changed by Fn+Space or the desktop environment
+static int get_brightness(){
+	FILE *const file=fopen(BRIGHTNESS_FILE_PATH,"r");
+	if(!file){
+		return -1;
+	}
+	int brightness;
+	int const scan_result=fscanf(file,"%d",&brightness);
+	fclose(file);
+	return scan_result==1?brightness:-1;
+}
+
 static void start_fade(int const brightness){
 	pthread_mutex_lock(&fader_mutex);
 	desired_brightness=brightness;
 	pthread_cond_signal(&fader_cond);
 	pthread_mutex_unlock(&fader_mutex);
+}
+
+static bool is_fading(){
+	pthread_mutex_lock(&fader_mutex);
+	// A fade is pending if the fader hasn't picked up the latest desired_brightness yet
+	bool const result=fade_in_progress||fader_target_brightness!=desired_brightness;
+	pthread_mutex_unlock(&fader_mutex);
+	return result;
 }
 
 static int string_to_int(int *const restrict result,int const min,int const max,char const *const restrict string){
@@ -166,8 +204,8 @@ static bool timespec_gt(struct timespec const ts1,struct timespec const ts2){
 }
 
 static int usage(){
-	log_write(LOG_NOTICE,"Usage: keylightc [--brightness <brightness>] [--fadeduration <fadeduration>] [--timeout <timeout>]");
-	log_write(LOG_NOTICE,"keylightc - automatic keyboard backlight daemon for Framework laptops");
+	log_write(LOG_NOTICE,"Usage: keylightb [--brightness <brightness>] [--fadeduration <fadeduration>] [--timeout <timeout>]");
+	log_write(LOG_NOTICE,"keylightb - automatic keyboard backlight daemon for Framework laptops");
 	log_write(LOG_NOTICE,"Options:");
 	log_write(LOG_NOTICE,"  --brightness\t\tbrightness level when active (1-100) [default=%d]",DEFAULT_BRIGHTNESS);
 	log_write(LOG_NOTICE,"  --fadeduration\tfade time in microseconds (1-1000000) [default=%d]",DEFAULT_FADE_DURATION_USEC);
@@ -194,6 +232,7 @@ void *fader(void*){
 			
 			// Either wait to be signaled for the next fade or calculate next_fade_step_time as appropriate
 			if(current_brightness==local_desired_brightness){
+				fade_in_progress=false;
 				goto fade_start_wait;
 			}else{
 				next_fade_step_time.tv_nsec+=fade_step_nsec;
@@ -207,6 +246,19 @@ void *fader(void*){
 			// If the fade step is not due and desired_brightness has changed, calculate the start time and interval
 			clock_gettime(CLOCK_MONOTONIC,&next_fade_step_time);
 			local_desired_brightness=desired_brightness;
+			fader_target_brightness=local_desired_brightness;
+
+			// Fade from the brightness actually applied, in case Fn+Space or the desktop environment changed it
+			int const actual_brightness=get_brightness();
+			if(actual_brightness>=0){
+				current_brightness=actual_brightness;
+			}
+			if(current_brightness==local_desired_brightness){
+				fade_in_progress=false;
+				goto fade_start_wait;
+			}
+
+			fade_in_progress=true;
 			fade_step_nsec=fade_duration_nsec/abs(current_brightness-local_desired_brightness);
 			goto fade_step;
 		}else if(current_brightness==local_desired_brightness){
@@ -226,7 +278,10 @@ int main(int const argc,char *const *const argv){
 	
 	int timeout_sec=DEFAULT_TIMEOUT_SEC;
 	int configured_brightness=DEFAULT_BRIGHTNESS;
-	
+
+	// Set when the backlight is manually turned off while active, cleared when it is manually turned back on
+	bool disabled=false;
+
 	int option;
 	while((option=getopt_long(argc,argv,"",long_options,NULL))!=EOF){
 		switch(option){
@@ -265,7 +320,7 @@ int main(int const argc,char *const *const argv){
 	}
 	setvbuf(brightness_file,NULL,_IONBF,0);
 	
-	struct pollfd found_device_pollfds[SEARCH_DEVICE_COUNT];
+	struct pollfd found_device_pollfds[MAX_DEVICE_COUNT];
 	int const found_device_count=get_input_fds(found_device_pollfds);
 	if(found_device_count<1){
 		log_write(LOG_ERR,"No matching input devices found!  Check permissions.");
@@ -340,15 +395,42 @@ int main(int const argc,char *const *const argv){
 		if(timespec_gt(off_time,current_time)){
 			// If the off_time is in the future
 			if(desired_brightness==0){
-				// And the backlight is currently off, turn it on
-				log_write(LOG_DEBUG,"Turning backlight on");
-				start_fade(configured_brightness);
+				// And the backlight is currently off, check whether it was turned on while idle (e.g. Fn+Space or the desktop environment restoring it)
+				if(!is_fading()){
+					int const actual_brightness=get_brightness();
+					if(actual_brightness>0){
+						if(disabled){
+							log_write(LOG_INFO,"Backlight turned back on manually, resuming");
+							disabled=false;
+						}
+						if(actual_brightness!=configured_brightness){
+							log_write(LOG_INFO,"Brightness level changed to %d%%",actual_brightness);
+							configured_brightness=actual_brightness;
+						}
+					}
+				}
+
+				// Turn it on, unless it was manually turned off
+				if(!disabled){
+					log_write(LOG_DEBUG,"Turning backlight on");
+					start_fade(configured_brightness);
+				}
 			}
-			
+
 			// Sleep until off_time
 			clock_nanosleep(CLOCK_MONOTONIC,TIMER_ABSTIME,&off_time,NULL);
 		}else if(desired_brightness==configured_brightness){
-			// Otherwise, turn it off
+			// Otherwise, check whether the brightness was changed while active, then turn it off
+			if(!is_fading()){
+				int const actual_brightness=get_brightness();
+				if(actual_brightness==0){
+					log_write(LOG_INFO,"Backlight turned off manually, staying off until it is turned back on");
+					disabled=true;
+				}else if(actual_brightness>0&&actual_brightness!=configured_brightness){
+					log_write(LOG_INFO,"Brightness level changed to %d%%",actual_brightness);
+					configured_brightness=actual_brightness;
+				}
+			}
 			log_write(LOG_DEBUG,"Turning backlight off");
 			start_fade(0);
 		}

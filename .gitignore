@@ -1,2 +1,5 @@
-keylightc
-debian/files
+keylightb
+pkg/src/
+pkg/pkg/
+pkg/keylightb/
+pkg/*.pkg.tar.*
