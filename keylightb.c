@@ -271,7 +271,8 @@ static int parse_level_map(char const *const restrict string){
 		level_map_to[level_map_count]=to;
 		level_map_count++;
 	}
-	return level_map_count>0?EXIT_SUCCESS:EXIT_FAILURE;
+	// An empty list means no remapping
+	return EXIT_SUCCESS;
 }
 
 static int map_level(int const brightness){

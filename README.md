@@ -34,7 +34,7 @@ Running
 keylightb must either be run as root or using the included systemd unit.
 
 ### Settings
-Settings live in `/etc/keylightb.conf`. The package installs a commented example; remove the `#` in front of a setting to use it, then restart the service:
+Settings live in `/etc/keylightb.conf`, which the package installs with every setting at its default. Change the values, then restart the service:
 
 	$ sudo nano /etc/keylightb.conf
 	$ sudo systemctl restart keylightb
