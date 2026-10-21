@@ -48,6 +48,9 @@
 #define DEFAULT_BRIGHTNESS 30
 #define DEFAULT_FADE_DURATION_USEC 100000
 
+// How often to check whether the backlight was turned on externally while it is off
+#define EXTERNAL_CHECK_INTERVAL_MSEC 500
+
 // SD_LISTEN_FDS_START, but we don't want to link to systemd
 #define BRIGHTNESS_FD 3
 
@@ -355,9 +358,17 @@ int main(int const argc,char *const *const argv){
 		}
 		
 		// If the backlight is on, we just woke up from sleeping until off_time at the bottom of the loop, so return immediately and process any input from that time period
-		// If the backlight is off, sleep until new input occurs
-		int poll_result=poll(found_device_pollfds,found_device_count,desired_brightness==configured_brightness?0:-1);
-		if(poll_result>0){
+		// If the backlight is off, sleep until new input occurs, waking periodically to check whether it was turned on without any input (Fn+Space is handled by the EC and produces no input event)
+		int poll_result=poll(found_device_pollfds,found_device_count,desired_brightness==configured_brightness?0:EXTERNAL_CHECK_INTERVAL_MSEC);
+		if(poll_result==0&&desired_brightness==0&&!is_fading()){
+			int const actual_brightness=get_brightness();
+			if(actual_brightness>0){
+				// Treat it as activity so the backlight times out normally; the brightness level is adopted below
+				log_write(LOG_DEBUG,"Backlight turned on externally");
+				clock_gettime(CLOCK_MONOTONIC,&off_time);
+				off_time.tv_sec+=timeout_sec;
+			}
+		}else if(poll_result>0){
 			for(int device_index=0;device_index<found_device_count;device_index++){
 				if(found_device_pollfds[device_index].revents&POLLIN){
 					struct input_event input_events[512];
