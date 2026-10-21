@@ -201,8 +201,9 @@ static bool firmware_auto_active(int *const restrict settled_brightness){
 		nanosleep(&probe_delay,NULL);
 		int const after_brightness=get_brightness();
 		if(after_brightness==probe_brightness){
-			// The nudge stuck, so the firmware accepts writes; put the level back
+			// The nudge stuck, so the firmware accepts writes; put the level back and give the firmware time to apply it before anything reads it
 			fprintf(brightness_file,"%d",before_brightness);
+			nanosleep(&probe_delay,NULL);
 			return false;
 		}else if(after_brightness==before_brightness&&++ignored_count>=AUTO_PROBE_REQUIRED_IGNORES){
 			return true;
